@@ -3,17 +3,13 @@
 version = 4
 
 [[package]]
-name = "common"
-version = "0.1.0"
-
-[[package]]
 name = "gbdb"
 version = "0.1.0"
 
 [[package]]
-name = "memtable"
+name = "gbdb-common"
 version = "0.1.0"
 
 [[package]]
-name = "wal"
+name = "gbdb-engine"
 version = "0.1.0"

@@ -1,5 +1,5 @@
 [package]
-name = "wal"
+name = "gbdb-engine"
 version = "0.1.0"
 edition = "2024"
 

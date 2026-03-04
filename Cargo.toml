@@ -1,9 +1,8 @@
 [workspace]
 members = [
-    "gbdb",
-    "wal",
-    "memtable",
-    "common",
+    "crates/engine",
+    "crates/common",
+    "crates/server",
 ]
 
 resolver = "2"
