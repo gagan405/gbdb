@@ -3,5 +3,17 @@
 version = 4
 
 [[package]]
+name = "common"
+version = "0.1.0"
+
+[[package]]
 name = "gbdb"
+version = "0.1.0"
+
+[[package]]
+name = "memtable"
+version = "0.1.0"
+
+[[package]]
+name = "wal"
 version = "0.1.0"
