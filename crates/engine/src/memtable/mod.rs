@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use bytes::Bytes;
 
 /// Sequence number type. Monotonically increasing, assigned per write.
