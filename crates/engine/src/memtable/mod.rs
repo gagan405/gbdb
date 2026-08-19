@@ -1,79 +1,99 @@
 #![allow(dead_code)]
-use bytes::Bytes;
 
-/// Sequence number type. Monotonically increasing, assigned per write.
-pub type SequenceNumber = u64;
+use gbdb_common::key::SequenceNumber;
 
-/// The type of a record stored in the MemTable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecordType {
-    Value,
-    Deletion,
-}
-
-/// A key as stored internally — user key + sequence number + record type.
-/// Ordering: user_key ASC, sequence_number DESC (newest first for same key).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InternalKey {
-    pub user_key: Bytes,
-    pub sequence_number: SequenceNumber,
-    pub record_type: RecordType,
-}
-
-impl PartialOrd for InternalKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for InternalKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.user_key
-            .cmp(&other.user_key)
-            // Reverse sequence number order: higher seq = more recent = comes first
-            .then(other.sequence_number.cmp(&self.sequence_number))
-    }
-}
-
-/// The result of a MemTable lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LookupResult {
-    /// Key exists and has a value.
-    Found(Bytes),
-    /// Key was explicitly deleted (tombstone). Do not search further.
+/// The result of a MemTable lookup at a snapshot.
+///
+/// The distinction between `Deleted` and `NotFound` is what makes the LSM read
+/// path correct: a tombstone terminates the search, an absent key continues it
+/// into older tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LookupResult<'a> {
+    /// Key exists at this snapshot. Borrowed from the index arena.
+    Found(&'a [u8]),
+    /// Key was explicitly deleted (tombstone). Do not search older tables.
     Deleted,
-    /// Key not present in this MemTable. Continue search in older tables/SSTables.
+    /// Key not present in this MemTable. Continue into older tables/SSTables.
     NotFound,
 }
 
 /// The interface all MemTable index structures must satisfy.
 ///
+/// Keys crossing this boundary are *encoded* internal keys (see
+/// `gbdb_common::key`), never structured ones — the index only ever needs to
+/// compare and copy bytes, and the same encoding is what SSTables store.
+///
 /// Implementations must be:
-/// - Ordered by `InternalKey` (user_key ASC, seq DESC)
+/// - Ordered by `gbdb_common::key::compare`
 /// - Safe for concurrent access (one writer, multiple readers is the minimum)
-/// - Iterable in key order (required for SSTable flush)
+/// - Traversable in key order, for flush and for prefix scans
+///
+/// This trait is a compile-time seam for swapping the index implementation, not
+/// a runtime polymorphism point. Callers should be generic over it rather than
+/// holding a `dyn MemIndex`, so probes don't pay a virtual call.
 pub(crate) trait MemIndex: Send + Sync {
-    /// Insert or overwrite a key-value pair.
-    fn insert(&self, key: InternalKey, value: Bytes);
+    type Cursor<'a>: MemCursor
+    where
+        Self: 'a;
 
-    /// Insert a tombstone (deletion marker) for a key.
-    fn delete(&self, key: InternalKey);
+    /// Append a version. Never overwrites: an existing entry for the same user
+    /// key at a lower sequence number stays visible to older snapshots, and
+    /// deletions arrive through this same path as `RecordType::Deletion` with an
+    /// empty value.
+    ///
+    /// Key and value are copied into the index's own storage.
+    fn insert(&self, encoded_key: &[u8], value: &[u8]);
 
-    /// Look up a user key as of a given sequence number.
-    /// Returns the newest version of the key with sequence_number <= read_seq.
-    fn get(&self, user_key: &Bytes, read_seq: SequenceNumber) -> LookupResult;
+    /// Newest version of `user_key` with `sequence_number <= read_seq`.
+    fn get<'a>(&'a self, user_key: &[u8], read_seq: SequenceNumber) -> LookupResult<'a>;
 
-    /// Iterate all entries in InternalKey order.
-    /// Used during MemTable flush to write a sorted SSTable.
-    fn iter(&self) -> Box<dyn Iterator<Item = (InternalKey, Bytes)> + '_>;
+    /// Cursor over all entries in encoded-key order.
+    fn cursor(&self) -> Self::Cursor<'_>;
 
-    /// Approximate memory usage in bytes. Used to decide when to freeze.
+    /// Approximate memory usage in bytes, used to decide when to freeze.
     fn approximate_size(&self) -> usize;
 
-    /// Number of entries (including tombstones).
+    /// Number of entries, including tombstones and shadowed versions.
     fn len(&self) -> usize;
 
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Ordered traversal over a [`MemIndex`].
+///
+/// Positioned cursor rather than an `Iterator` of owned pairs: flush walks every
+/// entry of a full MemTable, so a per-entry allocation there is a hot-loop cost.
+/// `key` and `value` borrow from the index for as long as the cursor is not
+/// moved.
+///
+/// A cursor starts invalid; call [`MemCursor::seek_to_first`] or
+/// [`MemCursor::seek`] before reading.
+pub(crate) trait MemCursor {
+    /// Position at the smallest key. Full scans (flush) start here.
+    fn seek_to_first(&mut self);
+
+    /// Position at the first key >= `encoded_key`, or invalid if none exists.
+    ///
+    /// This is both the point-lookup primitive (seek to
+    /// `InternalKey::seek(user_key, read_seq)`) and the prefix-scan primitive
+    /// that graph adjacency walks are built on.
+    fn seek(&mut self, encoded_key: &[u8]);
+
+    /// Move to the next key in order, or become invalid at the end.
+    fn advance(&mut self);
+
+    /// Whether the cursor is positioned at an entry.
+    fn is_valid(&self) -> bool;
+
+    /// Encoded internal key at the current position.
+    ///
+    /// Panics if the cursor is not valid.
+    fn key(&self) -> &[u8];
+
+    /// Value at the current position; empty for tombstones.
+    ///
+    /// Panics if the cursor is not valid.
+    fn value(&self) -> &[u8];
 }

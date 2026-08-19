@@ -21,4 +21,5 @@ name = "gbdb-engine"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "gbdb-common",
 ]
